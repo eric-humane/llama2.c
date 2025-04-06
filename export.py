@@ -324,7 +324,7 @@ def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
     # TODO check values for:
     # pretraining_tp, initializer_range, use_cache,
     # rope_theta, and rope_scaling.
-
+    
     config = LlamaConfig(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
