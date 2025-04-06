@@ -1,16 +1,32 @@
+"""Llama 2 transformer language model implementation."""
+
 import math
-import struct
 import inspect
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+# Import FlashAttention
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+    HAS_FLASH_ATTN = True
+    print("FlashAttention2 is available and will be used")
+except ImportError:
+    HAS_FLASH_ATTN = False
+    print("FlashAttention2 is not available, falling back to manual attention")
+
+
 @dataclass
 class ModelArgs:
+    """
+    Configuration parameters for Llama 2 model.
+    Defines architecture hyperparameters like dimensions, layer count, and vocabulary size.
+    """
+
     # default hyperparameters for the Llama 7B model
     dim: int = 4096
     n_layers: int = 32
@@ -25,6 +41,11 @@ class ModelArgs:
 
 
 class RMSNorm(torch.nn.Module):
+    """
+    Root Mean Square Layer Normalization as used in Llama models.
+    Normalizes the input using RMS instead of mean and std as in standard LayerNorm.
+    """
+
     def __init__(self, dim: int, eps: float):
         super().__init__()
         self.eps = eps
@@ -34,11 +55,30 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        """Apply RMS normalization to the input tensor.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Normalized tensor with scaling applied
+        """
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    """
+    Precompute the frequency cis (cosine and sine) terms for rotary position embeddings.
+
+    Args:
+        dim: Dimension of the embedding
+        end: Maximum sequence length
+        theta: Base value for the frequency
+
+    Returns:
+        Tuple of (cos, sin) tensors containing the precomputed values
+    """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
@@ -46,20 +86,40 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
 
+
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    """
+    Reshape frequency tensor for broadcasting it with the input tensor.
+
+    Args:
+        freqs_cis: Tensor containing precomputed frequency values
+        x: Tensor to broadcast against
+
+    Returns:
+        Reshaped frequency tensor that can be properly broadcast with x
+    """
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
 
+def apply_rotary_emb(
+    xq: torch.Tensor, xk: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply rotary positional embeddings to the query and key tensors.
+
+    Args:
+        xq: Query tensor
+        xk: Key tensor
+        freqs_cos: Cosine component of the frequency
+        freqs_sin: Sine component of the frequency
+
+    Returns:
+        Tuple of (query, key) tensors after applying rotary embeddings
+    """
     # reshape xq and xk to match the complex representation
     xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
@@ -80,6 +140,7 @@ def apply_rotary_emb(
 
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
+
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -91,7 +152,13 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
+
 class Attention(nn.Module):
+    """
+    Multi-head attention mechanism with support for grouped-query attention
+    as used in the Llama architecture.
+    """
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
@@ -109,13 +176,14 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
 
-        # use flash attention or a manual implementation?
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+        # Create a mask buffer for manual attention implementation (used as fallback)
+        if not HAS_FLASH_ATTN:
+            print("Using manual attention implementation (no flash attention)")
             mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
+        else:
+            print("Using FlashAttention2 implementation")
 
     def forward(
         self,
@@ -123,6 +191,17 @@ class Attention(nn.Module):
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
     ):
+        """
+        Forward pass for multi-head attention with rotary embeddings.
+
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, dim]
+            freqs_cos: Cosine component for rotary embeddings
+            freqs_sin: Sine component for rotary embeddings
+
+        Returns:
+            Output tensor after applying attention
+        """
         bsz, seqlen, _ = x.shape
 
         # QKV
@@ -138,25 +217,45 @@ class Attention(nn.Module):
         xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
-        # make heads into a batch dimension
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = xk.transpose(1, 2)
-        xv = xv.transpose(1, 2)
+        if HAS_FLASH_ATTN and xq.device.type == "cuda":
+            # Flash Attention expects shape (batch_size, seq_len, num_heads, head_dim)
+            # No need to transpose here, flash_attn_func works with (B, S, H, D) layout
 
-        # flash implementation
-        if self.flash:
-            output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+            # Apply dropout to attention if needed
+            dropout_p = self.dropout if self.training else 0.0
+
+            # Create causal mask - flash_attn_func automatically applies causal mask
+            # when causal=True
+            output = flash_attn_func(
+                xq,
+                xk,
+                xv,
+                dropout_p=dropout_p,
+                causal=True,
+                softmax_scale=1.0 / math.sqrt(self.head_dim),
+            )
+
+            # Reshape output to (bs, seqlen, n_local_heads * head_dim)
+            output = output.contiguous().view(bsz, seqlen, -1)
         else:
+            # Fallback to manual implementation
+            # make heads into a batch dimension
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+
             # manual implementation
             scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-            assert hasattr(self, 'mask')
-            scores = scores + self.mask[:, :, :seqlen, :seqlen]   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            assert hasattr(self, "mask")
+            scores = (
+                scores + self.mask[:, :, :seqlen, :seqlen]
+            )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
 
-        # restore time as batch dimension and concat heads
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            # restore time as batch dimension and concat heads
+            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
         # final projection into the residual stream
         output = self.wo(output)
@@ -165,6 +264,11 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """
+    Feed-forward network used in transformer blocks, implementing a variant
+    of SwiGLU activation with three projection matrices.
+    """
+
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
         super().__init__()
         if hidden_dim is None:
@@ -177,10 +281,27 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        """
+        Forward pass through the feed-forward network.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Processed tensor after applying ReLU squared and projection
+        """
+        w1x = self.w1(x)
+        w3x = self.w3(x)
+        hidden = (F.relu(w1x) ** 2) * w3x
+        return self.dropout(self.w2(hidden))
 
 
 class TransformerBlock(nn.Module):
+    """
+    Standard transformer block with self-attention followed by a feed-forward network,
+    with residual connections and layer normalization.
+    """
+
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
@@ -198,12 +319,29 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
+        """
+        Forward pass through transformer block.
+
+        Args:
+            x: Input tensor
+            freqs_cos: Cosine of precomputed frequency for rotary embeddings
+            freqs_sin: Sine of precomputed frequency for rotary embeddings
+
+        Returns:
+            Transformed tensor after self-attention and feed-forward layers
+        """
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
 
 class Transformer(nn.Module):
+    """
+    Decoder-only transformer language model, based on the Llama architecture.
+    Consists of token embeddings, multiple transformer blocks, and a final
+    projection layer to vocabulary logits.
+    """
+
     last_loss: Optional[torch.Tensor]
 
     def __init__(self, params: ModelArgs):
@@ -221,10 +359,14 @@ class Transformer(nn.Module):
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
         # share the unembedding parameters with the embedding parameters
-        self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
+        self.tok_embeddings.weight = (
+            self.output.weight
+        )  # https://paperswithcode.com/method/weight-tying
 
         # some useful precompute for the RoPE relative positional embeddings
-        freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            self.params.dim // self.params.n_heads, self.params.max_seq_len
+        )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
@@ -232,8 +374,10 @@ class Transformer(nn.Module):
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
-            if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
+            if pn.endswith("wo.weight"):
+                torch.nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * params.n_layers)
+                )
 
         # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
         self.last_loss = None
@@ -246,7 +390,19 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass through the transformer model.
+
+        Args:
+            tokens: Input token indices (batch, sequence length)
+            targets: Optional target token indices for computing loss
+
+        Returns:
+            Logits tensor of shape (batch, sequence length, vocab_size) or (batch, 1, vocab_size)
+        """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
@@ -260,15 +416,31 @@ class Transformer(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.output(h)
-            self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            self.last_loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+            )
         else:
             # inference-time mini-optimization: only forward the output on the very last position
-            logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.output(
+                h[:, [-1], :]
+            )  # note: using list [-1] to preserve the time dim
             self.last_loss = None
 
         return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        """
+        Configure and return an AdamW optimizer for the model.
+
+        Args:
+            weight_decay: Weight decay coefficient
+            learning_rate: Learning rate for optimizer
+            betas: Beta parameters for AdamW
+            device_type: Device type ('cuda' or 'cpu') to determine if fused version is used
+
+        Returns:
+            Configured optimizer with appropriate parameter groups
+        """
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -278,35 +450,41 @@ class Transformer(nn.Module):
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        print(
+            f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
+        )
+        print(
+            f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
+        )
         # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == "cuda"
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        optimizer = torch.optim.AdamW(
+            optim_groups, lr=learning_rate, betas=betas, **extra_args
+        )
         print(f"using fused AdamW: {use_fused}")
 
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+        """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = sum(p.numel() for p in self.parameters())
         cfg = self.params
-        L, H, Q, T = cfg.n_layers, cfg.n_heads, cfg.dim//cfg.n_heads, cfg.max_seq_len
-        flops_per_token = 6*N + 12*L*H*Q*T
+        L, H, Q, T = cfg.n_layers, cfg.n_heads, cfg.dim // cfg.n_heads, cfg.max_seq_len
+        flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        flops_achieved = flops_per_iter * (1.0 / dt)  # per second
+        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
         mfu = flops_achieved / flops_promised
         return mfu
 
@@ -320,10 +498,14 @@ class Transformer(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.params.max_seq_len else idx[:, -self.params.max_seq_len:]
+            idx_cond = (
+                idx
+                if idx.size(1) <= self.params.max_seq_len
+                else idx[:, -self.params.max_seq_len :]
+            )
             # forward the model to get the logits for the index in the sequence
             logits = self(idx_cond)
-            logits = logits[:, -1, :] # crop to just the final time step
+            logits = logits[:, -1, :]  # crop to just the final time step
             if temperature == 0.0:
                 # "sample" the single most likely index
                 _, idx_next = torch.topk(logits, k=1, dim=-1)
@@ -333,7 +515,7 @@ class Transformer(nn.Module):
                 # optionally crop the logits to only the top k options
                 if top_k is not None:
                     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                    logits[logits < v[:, [-1]]] = -float('Inf')
+                    logits[logits < v[:, [-1]]] = -float("Inf")
                 # apply softmax to convert logits to (normalized) probabilities
                 probs = F.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)

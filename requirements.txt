@@ -1,7 +1,9 @@
-numpy==1.23.5
-pytest==7.4.0
-Requests==2.31.0
-sentencepiece==0.1.99
-torch==2.0.1
-tqdm==4.64.1
-wandb==0.15.5
+pytest==8.3.5
+requests==2.32.2
+sentencepiece==0.2.0
+torch==2.6.0
+tqdm==4.67.1
+wandb==0.19.9
+datasets==3.5.0
+transformers
+flash-attn==2.5.6
