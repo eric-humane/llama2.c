@@ -34,8 +34,8 @@ from export import model_export
 # -----------------------------------------------------------------------------
 # I/O
 out_dir = "out"
-eval_interval = 1000
-log_interval = 100
+eval_interval = 5000
+log_interval = 1000
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
@@ -70,7 +70,7 @@ warmup_iters = 1000  # how many steps to warm up for
 # system
 device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = "bfloat16"  # float32|bfloat16|float16
-compile = True  # use PyTorch 2.0 to compile the model to be faster
+compile = False  # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [
     k
@@ -142,7 +142,7 @@ iter_batches = partial(
     vocab_size=vocab_size,
     vocab_source=vocab_source,
     device=device,
-    num_workers=8,
+    num_workers=16,
 )
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
