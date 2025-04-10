@@ -307,6 +307,31 @@ class PretokDataset(torch.utils.data.IterableDataset):
         self.vocab_source = vocab_source
         self.dataset_name = dataset_name
         self.quiet = quiet
+        
+        # Determine the shard filenames 
+        if self.vocab_source == "llama2":
+            # the .bin files are right along the .json files
+            bin_dir = os.path.join(DATA_CACHE_DIR, self.dataset_name)
+        elif self.vocab_source == "custom":
+            # the .bin files are in tok{N} directory
+            bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{self.vocab_size}")
+        
+        self.shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
+        # train/test split. let's use only shard 0 for test split, rest train
+        self.shard_filenames = self.shard_filenames[1:] if self.split == "train" else self.shard_filenames[:1]
+        assert len(self.shard_filenames) > 0, f"No bin files found in {bin_dir}"
+        
+        # Calculate estimated total length for the dataset
+        self.total_tokens = 0
+        for shard in self.shard_filenames:
+            self.total_tokens += os.path.getsize(shard) // 2  # uint16 = 2 bytes
+        
+        # Estimate number of sequences based on max_seq_len
+        self.estimated_length = self.total_tokens // self.max_seq_len
+
+    def __len__(self):
+        """Return an estimated length of the dataset for DistributedSampler"""
+        return self.estimated_length
 
     def __iter__(self):
         # get worker info within a DataLoader
@@ -319,17 +344,9 @@ class PretokDataset(torch.utils.data.IterableDataset):
         if not self.quiet:
             print(f"Created a PretokDataset with rng seed {seed}")
         rng = random.Random(seed)
-        if self.vocab_source == "llama2":
-            # the .bin files are right along the .json files
-            bin_dir = os.path.join(DATA_CACHE_DIR, self.dataset_name)
-            shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
-        elif self.vocab_source == "custom":
-            # the .bin files are in tok{N} directory
-            bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{self.vocab_size}")
-            shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
-        # train/test split. let's use only shard 0 for test split, rest train
-        shard_filenames = shard_filenames[1:] if self.split == "train" else shard_filenames[:1]
-        assert len(shard_filenames)>0, f"No bin files found in {bin_dir}"
+        
+        shard_filenames = self.shard_filenames.copy()
+        
         while True:
             rng.shuffle(shard_filenames)
             for shard in shard_filenames:
@@ -400,17 +417,28 @@ class Task:
             
         ds = PretokDataset(**dataset_kwargs)
         
-        # Use DistributedSampler if in distributed mode
-        sampler = None
+        # For distributed training, we'll use a sequential sampler
+        # This prevents the DistributedSampler from trying to call len()
+        loader_args = {
+            'batch_size': batch_size,
+            'pin_memory': True,
+            'num_workers': num_workers,
+        }
+        
         if dist.is_initialized():
-            sampler = torch.utils.data.distributed.DistributedSampler(ds)
+            # Custom handling for distributed mode - manually partition data
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
             
-        dl = torch.utils.data.DataLoader(
-            ds, batch_size=batch_size, 
-            pin_memory=True, 
-            num_workers=num_workers,
-            sampler=sampler
-        )
+            def worker_init_fn(worker_id):
+                # Set unique seed for each worker and rank
+                worker_seed = 42 + worker_id + 1337 * rank
+                random.seed(worker_seed)
+                np.random.seed(worker_seed)
+                
+            loader_args['worker_init_fn'] = worker_init_fn
+        
+        dl = torch.utils.data.DataLoader(ds, **loader_args)
         
         # Set optimal CUDA settings if GPU is available
         if device.type == 'cuda':
