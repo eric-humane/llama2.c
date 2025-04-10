@@ -47,8 +47,7 @@ def setup_multi_gpu():
         
         # Initialize the distributed environment
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", init_method="env://", 
-                               rank=rank, world_size=world_size)
+        dist.init_process_group(backend="nccl")
         
         print(f"Distributed training active - Rank: {rank}/{world_size}, Local rank: {local_rank}")
         return local_rank
