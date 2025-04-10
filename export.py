@@ -21,6 +21,7 @@ import struct
 import argparse
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 import torch
@@ -124,7 +125,7 @@ def legacy_export(model, filepath):
 
     # write to binary file
     out_file.close()
-    print(f"wrote {filepath}")
+    print(f"wrote {filepath} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # -----------------------------------------------------------------------------
 # new version
