@@ -23,7 +23,6 @@ from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 
-import psutil
 import torch
 from model import Transformer, ModelArgs
 from torch.distributed import destroy_process_group, init_process_group
