@@ -23,6 +23,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 
+import psutil
 import torch
 from model import Transformer, ModelArgs
 from torch.distributed import destroy_process_group, init_process_group
@@ -31,11 +32,17 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tinystories import Task
 from export import model_export
 
+logical_cpus = psutil.cpu_count(logical=False)
+
+print(logical_cpus)
+
+os.environ['OMP_NUM_THREADS'] = str(logical_cpus)
+
 # -----------------------------------------------------------------------------
 # I/O
 out_dir = "out"
 eval_interval = 2000
-log_interval = 2000
+log_interval = 1000
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
