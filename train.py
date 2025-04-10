@@ -142,8 +142,7 @@ iter_batches = partial(
     vocab_size=vocab_size,
     vocab_source=vocab_source,
     device=device,
-    num_workers=4,
-    pin_memory=True
+    num_workers=8,
 )
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
