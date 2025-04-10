@@ -445,7 +445,7 @@ class Task:
             # Enable cudnn benchmark for faster training
             torch.backends.cudnn.benchmark = True
             # Set memory allocation settings - 95% for A100s
-            torch.cuda.set_per_process_memory_fraction(GPU_MEM_FRACTION)
+            # torch.cuda.set_per_process_memory_fraction(GPU_MEM_FRACTION)
             
         for x, y in dl:
             x = x.to(device, non_blocking=True)
