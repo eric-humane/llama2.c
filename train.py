@@ -32,7 +32,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tinystories import Task
 from export import model_export
 
-logical_cpus = os.process_cpu_count()
+logical_cpus = os.process_cpu_count() - 1
 
 print(logical_cpus)
 
