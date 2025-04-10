@@ -92,7 +92,9 @@ assert vocab_source == "custom" or vocab_size == 32000, "The vocab from Meta has
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
 if ddp:
-    init_process_group(backend="nccl")
+    # Check if the process group is already initialized before initializing it
+    if not torch.distributed.is_initialized():
+        init_process_group(backend="nccl")
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
     ddp_world_size = int(os.environ["WORLD_SIZE"])
