@@ -104,6 +104,10 @@ if ddp:
     seed_offset = ddp_rank  # each process gets a different seed
     # world_size number of processes will be training simultaneously, so we can scale
     # down the desired gradient accumulation iterations per process proportionally
+    if gradient_accumulation_steps < ddp_world_size:
+        print(f"WARNING: gradient_accumulation_steps ({gradient_accumulation_steps}) is less than ddp_world_size ({ddp_world_size})")
+        print(f"Setting gradient_accumulation_steps to {ddp_world_size}")
+        gradient_accumulation_steps = ddp_world_size
     assert gradient_accumulation_steps % ddp_world_size == 0
     gradient_accumulation_steps //= ddp_world_size
 else:
