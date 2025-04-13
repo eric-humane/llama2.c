@@ -270,7 +270,7 @@ def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
         print("Please run `pip install transformers` to install it")
         return None
 
-    # Generate LlamaModel state_dict
+    # Generate LlamaModel state_dict
     hf_state_dict = {}
 
     # Sometimes we have repeated key values for the heads
@@ -343,7 +343,7 @@ def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
 
 
     # Save files in directory filepath
-    # First make the directory if it doesn't exist
+    # First make the directory if it doesn't exist
     os.makedirs(filepath, exist_ok=True)
 
     # Save the state dictionary in .bin format, and config as .json
@@ -497,6 +497,7 @@ def model_export(model, filepath, version, dtype=torch.float32):
     v0: legacy llama2.c float format, DEPRECATED
     v1: float32 export
     v2: int8 quantized Q8_0 export, similar to llama.cpp, in groups
+    v3: half-precision (fp16) export for ESP32-S3
     # TODO: add dtype export support for other versions (?)
     """
     if version == 0:
@@ -505,6 +506,8 @@ def model_export(model, filepath, version, dtype=torch.float32):
         version1_export(model, filepath)
     elif version == 2:
         version2_export(model, filepath)
+    elif version == 3:
+        version3_export(model, filepath)
     elif version == -1:
         hf_export(model, filepath, dtype)
     else:
@@ -538,6 +541,74 @@ def torchscript_export(model, filepath, zero_params=False, gzip_output=False):
                 shutil.copyfileobj(f_in, f_out)
         os.unlink(filepath)
 
+def version3_export(model, filepath):
+    """
+    Export the model weights in half-precision (fp16) format for ESP32-S3.
+    This saves memory while allowing conversion to fp32 on the fly during inference.
+    """
+    version = 3
+
+    out_file = open(filepath, 'wb')
+    # first write out the header. the header will be 256 bytes
+    # 1) write magic, which will be uint32 of "ak42" in ASCII
+    out_file.write(struct.pack('I', 0x616b3432))
+    # 2) write version, which will be int
+    out_file.write(struct.pack('i', version))
+    # 3) write the params, which will be 7 ints
+    p = model.params
+    hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
+    n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
+    header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
+                                    n_kv_heads, p.vocab_size, p.max_seq_len)
+    out_file.write(header)
+    # 4) write some other flags
+    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
+    out_file.write(struct.pack('B', int(shared_classifier)))
+    pad = 256 - out_file.tell() # pad rest with zeros; tell returns current pos
+    assert pad >= 0
+    out_file.write(b'\0' * pad)
+
+    # Serialize weights in fp16 format
+    def serialize_fp16(file, tensor):
+        """ writes one fp16 tensor to file that is open in wb mode """
+        d = tensor.detach().cpu().view(-1).to(torch.float16).numpy()
+        b = struct.pack(f'{len(d)}e', *d)  # 'e' is the format for half-precision (16-bit) float
+        file.write(b)
+
+    # now let's write out all the params in fp16
+    weights = [
+        *[layer.attention_norm.weight for layer in model.layers],
+        *[layer.ffn_norm.weight for layer in model.layers],
+        model.norm.weight,
+        model.tok_embeddings.weight,
+        *[layer.attention.wq.weight for layer in model.layers],
+        *[layer.attention.wk.weight for layer in model.layers],
+        *[layer.attention.wv.weight for layer in model.layers],
+        *[layer.attention.wo.weight for layer in model.layers],
+        *[layer.feed_forward.w1.weight for layer in model.layers],
+        *[layer.feed_forward.w2.weight for layer in model.layers],
+        *[layer.feed_forward.w3.weight for layer in model.layers],
+    ]
+    if not shared_classifier:
+        weights.append(model.output.weight)
+
+    # Write fp16 weights
+    max_abs_values = []
+    for w in weights:
+        # Calculate and store maximum absolute value for each weight tensor
+        max_abs = torch.max(torch.abs(w)).item()
+        max_abs_values.append(max_abs)
+        # Write the weight in fp16
+        serialize_fp16(out_file, w)
+    
+    # Write the maximum absolute values in fp32 for later scaling
+    for max_abs in max_abs_values:
+        out_file.write(struct.pack('f', max_abs))
+
+    # write to binary file
+    out_file.close()
+    print(f"wrote {filepath} in fp16 format")
+
 # -----------------------------------------------------------------------------
 # CLI entrypoint
 
@@ -547,12 +618,17 @@ if __name__ == "__main__":
     parser.add_argument("filepath", type=str, help="the output filepath")
     parser.add_argument("--version", default=0, type=int, help="the version to export with")
     parser.add_argument("--dtype", type=str, help="dtype of the model (fp16, fp32)", default="fp32")
+    parser.add_argument("--fp16", action="store_true", help="export in fp16 format (equivalent to --version 3)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--checkpoint", type=str, help="model checkpoint, .pt file")
     group.add_argument("--meta-llama", type=str, help="meta llama model path")
     group.add_argument("--hf", type=str, help="huggingface model path")
     args = parser.parse_args()
     dtype = {"fp16": torch.float16, "fp32": torch.float32}[args.dtype]
+
+    # If --fp16 flag is provided, use version 3 (fp16 export)
+    if args.fp16:
+        args.version = 3
 
     if args.checkpoint:
         model = load_checkpoint(args.checkpoint)

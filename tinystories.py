@@ -142,11 +142,17 @@ def download(dataset_name: str, dataset_config: Optional[str] = None,
         print(f"Number of shards: {len(shard_filenames)}")
         print(f"Example text:\n{data[0]}")
 
-def train_vocab(vocab_size, dataset_name: str, quiet=False):
+def train_vocab(vocab_size, dataset_name: str, quiet=False, special_tokens=None):
     """
     Trains a custom sentencepiece tokenizer on the dataset.
     The custom tokenizer files will be saved in DATA_CACHE_DIR/tok{N} directories,
     where N is the vocab size. This is also where the pretok .bin files will go.
+    
+    Args:
+        vocab_size: Size of the vocabulary
+        dataset_name: Name of the dataset to train on
+        quiet: Whether to reduce output verbosity
+        special_tokens: List of special tokens to add to the vocabulary (e.g. ["[INST]", "[/INST]"])
     """
     assert vocab_size > 0, "Vocab size must be positive"
 
@@ -194,6 +200,12 @@ def train_vocab(vocab_size, dataset_name: str, quiet=False):
         'unk_surface': r" \342\201\207 ",
         'normalization_rule_name': "identity"
     }
+    
+    # Add special tokens if provided
+    if special_tokens:
+        if not quiet:
+            print(f"Adding special tokens: {special_tokens}")
+        spm_train_kwargs['user_defined_symbols'] = special_tokens
     
     # Add quiet output if needed
     if quiet:
@@ -445,7 +457,7 @@ class Task:
             # Enable cudnn benchmark for faster training
             torch.backends.cudnn.benchmark = True
             # Set memory allocation settings - 95% for A100s
-            # torch.cuda.set_per_process_memory_fraction(GPU_MEM_FRACTION)
+            torch.cuda.set_per_process_memory_fraction(GPU_MEM_FRACTION)
             
         for x, y in dl:
             x = x.to(device, non_blocking=True)
@@ -523,6 +535,9 @@ if __name__ == "__main__":
     python tinystories.py train_vocab --vocab_size=2048 --dataset_name="TinyStories"
     python tinystories.py pretokenize --vocab_size=2048 --dataset_name="TinyStories"
     
+    To tokenize with custom special tokens (e.g., for instruction tuning):
+    python tinystories.py train_vocab --vocab_size=2048 --special_tokens="[INST],[/INST]"
+    
     To clean all downloaded data and output files:
     python tinystories.py fullclean
     """
@@ -538,6 +553,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true", help="Reduce verbosity of output logs")
     parser.add_argument("--max_shard_size", type=int, default=None, help="Maximum number of examples per shard")
     parser.add_argument("--multi_gpu", action="store_true", help="Enable optimizations for multi-GPU systems")
+    parser.add_argument("--special_tokens", type=str, default=None, help="Comma-separated list of special tokens to add (e.g. '[INST],[/INST]')")
     args = parser.parse_args()
 
     # Update global settings if provided in arguments
@@ -562,7 +578,11 @@ if __name__ == "__main__":
                  split=args.split, text_field=args.text_field, quiet=args.quiet)
     elif args.stage == "train_vocab":
         dataset_name = args.dataset_name.split("/")[-1] if "/" in args.dataset_name else args.dataset_name
-        train_vocab(vocab_size=args.vocab_size, dataset_name=dataset_name, quiet=args.quiet)
+        # Parse special tokens from comma-separated string to list
+        special_tokens = None
+        if args.special_tokens:
+            special_tokens = [token.strip() for token in args.special_tokens.split(',')]
+        train_vocab(vocab_size=args.vocab_size, dataset_name=dataset_name, quiet=args.quiet, special_tokens=special_tokens)
     elif args.stage == "pretokenize":
         dataset_name = args.dataset_name.split("/")[-1] if "/" in args.dataset_name else args.dataset_name
         pretokenize(vocab_size=args.vocab_size, dataset_name=dataset_name, quiet=args.quiet)
