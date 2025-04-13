@@ -69,7 +69,7 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.99
 grad_clip = 1.0      # set to 0.0 to disable clipping
-decay_lr = False
+decay_lr = True
 warmup_iters = 1000
 
 # System parameters
