@@ -136,7 +136,7 @@ iter_batches = partial(
     vocab_size=vocab_size,
     vocab_source=vocab_source,
     device=device,
-    num_workers=63,
+    num_workers=16,
 )
 
 # -----------------------------------------------------------------------------
