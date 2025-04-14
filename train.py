@@ -63,13 +63,13 @@ dropout = 0.05
 
 # Training/optimizer parameters
 gradient_accumulation_steps = 1
-learning_rate = 5e-4
+learning_rate = 5e-5  # Use a much smaller learning rate than 0.1
 max_iters = 100000
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.99
 grad_clip = 1.0      # set to 0.0 to disable clipping
-decay_lr = True
+decay_lr = True      # Turn decay_lr back on, but with a safer learning rate
 warmup_iters = 1000
 
 # System parameters
