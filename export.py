@@ -31,11 +31,13 @@ from torch import nn
 # Conditional import for transformers
 try:
     from transformers.models.llama.configuration_llama import LlamaConfig
+    from transformers import AutoModelForCausalLM
 
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
     LlamaConfig = None
+    AutoModelForCausalLM = None
 
 from model import ModelArgs, Transformer
 
@@ -430,13 +432,22 @@ def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
 
 
 def load_checkpoint(checkpoint):
+    """
+    Load a trained model from a checkpoint file.
+
+    Args:
+        checkpoint: Path to the checkpoint file (.pt)
+
+    Returns:
+        Transformer: The loaded model in evaluation mode
+    """
     # load the provided model checkpoint
     checkpoint_dict = torch.load(checkpoint, map_location="cpu")
     gptconf = ModelArgs(**checkpoint_dict["model_args"])
     model = Transformer(gptconf)
     state_dict = checkpoint_dict["model"]
     unwanted_prefix = "_orig_mod."
-    for k, v in list(state_dict.items()):
+    for k, _ in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
     model.load_state_dict(state_dict, strict=False)
@@ -445,6 +456,15 @@ def load_checkpoint(checkpoint):
 
 
 def load_meta_model(model_path):
+    """
+    Load a model from the official Meta Llama 2 format.
+
+    Args:
+        model_path: Path to the directory containing params.json and model weights
+
+    Returns:
+        Transformer: The loaded model in evaluation mode
+    """
     params_path = os.path.join(model_path, "params.json")
     with open(params_path) as f:
         params = json.load(f)
@@ -527,14 +547,21 @@ def load_meta_model(model_path):
 
 
 def load_hf_model(model_path):
+    """
+    Load a model from Hugging Face format and convert to llama2.c format.
+
+    Args:
+        model_path: Path to the Hugging Face model
+
+    Returns:
+        Transformer: The loaded model in evaluation mode or None if transformers package is unavailable
+    """
     if not TRANSFORMERS_AVAILABLE:
         print("Error: transformers package is required to load huggingface models")
         print("Please run `pip install transformers` to install it")
         return None
 
     # load HF model
-    from transformers import AutoModelForCausalLM
-
     hf_model = AutoModelForCausalLM.from_pretrained(model_path)
     hf_dict = hf_model.state_dict()
 

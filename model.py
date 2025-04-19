@@ -1,17 +1,30 @@
+"""
+Implementation of the Llama 2 transformer language model architecture.
+Contains model definition, attention mechanism, and necessary components for training and inference.
+"""
+
 import math
-import struct
 import inspect
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+"""
+Implementation of the Llama 2 transformer language model architecture.
+Contains model definition, attention mechanism, and necessary components for training and inference.
+"""
+
 
 @dataclass
 class ModelArgs:
+    """
+    Configuration parameters for Llama 2 model.
+    Defines architecture hyperparameters like dimensions, layer count, and vocabulary size.
+    """
+
     # default hyperparameters for the Llama 7B model
     dim: int = 4096
     n_layers: int = 32
@@ -26,6 +39,11 @@ class ModelArgs:
 
 
 class RMSNorm(torch.nn.Module):
+    """
+    Root Mean Square Layer Normalization as used in Llama models.
+    Normalizes the input using RMS instead of mean and std as in standard LayerNorm.
+    """
+
     def __init__(self, dim: int, eps: float):
         super().__init__()
         self.eps = eps
@@ -35,11 +53,30 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        """Apply RMS normalization to the input tensor.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Normalized tensor with scaling applied
+        """
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    """
+    Precompute the frequency cis (cosine and sine) terms for rotary position embeddings.
+
+    Args:
+        dim: Dimension of the embedding
+        end: Maximum sequence length
+        theta: Base value for the frequency
+
+    Returns:
+        Tuple of (cos, sin) tensors containing the precomputed values
+    """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
@@ -49,6 +86,16 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    """
+    Reshape frequency tensor for broadcasting it with the input tensor.
+
+    Args:
+        freqs_cis: Tensor containing precomputed frequency values
+        x: Tensor to broadcast against
+
+    Returns:
+        Reshaped frequency tensor that can be properly broadcast with x
+    """
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
@@ -59,6 +106,18 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 def apply_rotary_emb(
     xq: torch.Tensor, xk: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply rotary positional embeddings to the query and key tensors.
+
+    Args:
+        xq: Query tensor
+        xk: Key tensor
+        freqs_cos: Cosine component of the frequency
+        freqs_sin: Sine component of the frequency
+
+    Returns:
+        Tuple of (query, key) tensors after applying rotary embeddings
+    """
     # reshape xq and xk to match the complex representation
     xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
@@ -93,6 +152,11 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
+    """
+    Multi-head attention mechanism with support for grouped-query attention
+    as used in the Llama architecture.
+    """
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
@@ -122,6 +186,17 @@ class Attention(nn.Module):
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
     ):
+        """
+        Forward pass for multi-head attention with rotary embeddings.
+
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, dim]
+            freqs_cos: Cosine component for rotary embeddings
+            freqs_sin: Sine component for rotary embeddings
+
+        Returns:
+            Output tensor after applying attention
+        """
         bsz, seqlen, _ = x.shape
 
         # QKV
@@ -162,6 +237,11 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """
+    Feed-forward network used in transformer blocks, implementing a variant
+    of SwiGLU activation with three projection matrices.
+    """
+
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
         super().__init__()
         if hidden_dim is None:
@@ -174,6 +254,15 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
+        """
+        Forward pass through the feed-forward network.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Processed tensor after applying ReLU squared and projection
+        """
         w1x = self.w1(x)
         w3x = self.w3(x)
         hidden = (F.relu(w1x) ** 2) * w3x
@@ -181,6 +270,11 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
+    """
+    Standard transformer block with self-attention followed by a feed-forward network,
+    with residual connections and layer normalization.
+    """
+
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
@@ -198,12 +292,29 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
+        """
+        Forward pass through transformer block.
+
+        Args:
+            x: Input tensor
+            freqs_cos: Cosine of precomputed frequency for rotary embeddings
+            freqs_sin: Sine of precomputed frequency for rotary embeddings
+
+        Returns:
+            Transformed tensor after self-attention and feed-forward layers
+        """
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
 
 class Transformer(nn.Module):
+    """
+    Decoder-only transformer language model, based on the Llama architecture.
+    Consists of token embeddings, multiple transformer blocks, and a final
+    projection layer to vocabulary logits.
+    """
+
     last_loss: Optional[torch.Tensor]
 
     def __init__(self, params: ModelArgs):
@@ -255,6 +366,16 @@ class Transformer(nn.Module):
     def forward(
         self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        """
+        Forward pass through the transformer model.
+
+        Args:
+            tokens: Input token indices (batch, sequence length)
+            targets: Optional target token indices for computing loss
+
+        Returns:
+            Logits tensor of shape (batch, sequence length, vocab_size) or (batch, 1, vocab_size)
+        """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
@@ -281,6 +402,18 @@ class Transformer(nn.Module):
         return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        """
+        Configure and return an AdamW optimizer for the model.
+
+        Args:
+            weight_decay: Weight decay coefficient
+            learning_rate: Learning rate for optimizer
+            betas: Beta parameters for AdamW
+            device_type: Device type ('cuda' or 'cpu') to determine if fused version is used
+
+        Returns:
+            Configured optimizer with appropriate parameter groups
+        """
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
