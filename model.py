@@ -1,7 +1,4 @@
-"""
-Implementation of the Llama 2 transformer language model architecture.
-Contains model definition, attention mechanism, and necessary components for training and inference.
-"""
+"""Llama 2 transformer language model implementation."""
 
 import math
 import inspect
@@ -11,11 +8,6 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-"""
-Implementation of the Llama 2 transformer language model architecture.
-Contains model definition, attention mechanism, and necessary components for training and inference.
-"""
 
 
 @dataclass

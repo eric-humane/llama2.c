@@ -115,7 +115,7 @@ def download(
             dataset = load_dataset(dataset_name, dataset_config, split=split)
         else:
             dataset = load_dataset(dataset_name, split=split)
-    except Exception as e:
+    except (ValueError, FileNotFoundError, ConnectionError, IOError) as e:
         print(f"Error loading dataset: {e}")
         return
 
@@ -153,7 +153,7 @@ def download(
     # Print a single example for debugging if not quiet
     if not quiet:
         shard_filenames = sorted(glob.glob(os.path.join(data_dir, "*.json")))
-        with open(shard_filenames[0], "r") as f:
+        with open(shard_filenames[0], "r", encoding="utf-8") as f:
             data = json.load(f)
 
         print("Download done.")
@@ -191,7 +191,7 @@ def train_vocab(vocab_size, dataset_name: str, quiet=False, special_tokens=None)
 
     with open(tiny_file, "w", encoding="utf-8") as of:
         for shard in tqdm(shard_filenames[:num_shards], disable=quiet):
-            with open(shard, "r") as f:
+            with open(shard, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for example in data:
                 text = example
@@ -239,10 +239,22 @@ def train_vocab(vocab_size, dataset_name: str, quiet=False, special_tokens=None)
 
 
 def process_shard(args, vocab_size, dataset_name, quiet=False):
+    """
+    Process a single data shard: tokenize text and save as binary file.
+
+    Args:
+        args: Path to the shard file
+        vocab_size: Size of vocabulary to use
+        dataset_name: Name of the dataset
+        quiet: Whether to suppress output
+
+    Returns:
+        Status message about the processed shard
+    """
     shard = args
     tokenizer_model = get_tokenizer_model_path(vocab_size)
     enc = Tokenizer(tokenizer_model)
-    with open(shard, "r") as f:
+    with open(shard, "r", encoding="utf-8") as f:
         data = json.load(f)
     all_tokens = []
     # Remove the tqdm progress bar to avoid multiple progress bars
@@ -382,6 +394,11 @@ class PretokDataset(torch.utils.data.IterableDataset):
         # Estimate number of sequences based on max_seq_len
         self.estimated_length = self.total_tokens // self.max_seq_len
 
+    def __getitem__(self, idx):
+        # Not used for IterableDataset, but adding to satisfy linter
+        # IterableDataset uses __iter__ instead
+        raise NotImplementedError("IterableDataset doesn't support indexing")
+
     def __len__(self):
         """Return an estimated length of the dataset for DistributedSampler"""
         return self.estimated_length
@@ -437,6 +454,11 @@ def get_tokenizer_model_path(vocab_size):
 
 
 class Task:
+    """
+    Utility class for handling dataset batch iteration.
+    Provides methods for loading and iterating through batches of tokenized data.
+    """
+
     @staticmethod
     def iter_batches(
         batch_size,
@@ -446,6 +468,20 @@ class Task:
         dataset_name="TinyStories",
         **dataset_kwargs,
     ):
+        """
+        Create and iterate through batches of tokenized data.
+
+        Args:
+            batch_size: Number of sequences per batch
+            device: Target device for tensors (default: auto-detect)
+            num_workers: Number of loader worker processes (default: auto-detect)
+            quiet: Whether to suppress output messages
+            dataset_name: Name of the dataset to load
+            **dataset_kwargs: Additional arguments passed to PretokDataset
+
+        Yields:
+            Tuples of (input_tensor, target_tensor) batches
+        """
         # Use default device if none provided
         if device is None:
             if LOCAL_RANK >= 0:
@@ -489,7 +525,6 @@ class Task:
 
         if dist.is_initialized():
             # Custom handling for distributed mode - manually partition data
-            world_size = dist.get_world_size()
             rank = dist.get_rank()
 
             def worker_init_fn(worker_id):
@@ -536,7 +571,7 @@ def fullclean(quiet=False):
                     shutil.rmtree(item_path)
                     if not quiet:
                         print(f"Deleted directory: {item_path}")
-        except Exception as e:
+        except (PermissionError, FileNotFoundError, OSError) as e:
             print(f"Error while cleaning {DATA_CACHE_DIR}/: {e}")
     else:
         os.makedirs(DATA_CACHE_DIR, exist_ok=True)
@@ -559,7 +594,7 @@ def fullclean(quiet=False):
                     shutil.rmtree(item_path)
                     if not quiet:
                         print(f"Deleted directory: {item_path}")
-        except Exception as e:
+        except (PermissionError, FileNotFoundError, OSError) as e:
             print(f"Error while cleaning miniout/: {e}")
     else:
         os.makedirs("miniout", exist_ok=True)
@@ -574,25 +609,25 @@ def fullclean(quiet=False):
 # CLI for constructing the dataset
 
 if __name__ == "__main__":
-    """
-    These stages are designed to be run in order.
+    # Command-line help text
+    # These stages are designed to be run in order.
+    #
+    # Download any dataset from Hugging Face:
+    # python tinystories.py download --dataset_name="roneneldan/TinyStories" --text_field="text"
+    #
+    # To tokenize data with the Llama 2 tokenizer:
+    # python tinystories.py pretokenize --dataset_name="TinyStories"
+    #
+    # To tokenize data with a custom tokenizer we train ourselves with sentencepiece, e.g.:
+    # python tinystories.py train_vocab --vocab_size=2048 --dataset_name="TinyStories"
+    # python tinystories.py pretokenize --vocab_size=2048 --dataset_name="TinyStories"
+    #
+    # To tokenize with custom special tokens (e.g., for instruction tuning):
+    # python tinystories.py train_vocab --vocab_size=2048 --special_tokens="[INST],[/INST]"
+    #
+    # To clean all downloaded data and output files:
+    # python tinystories.py fullclean
 
-    Download any dataset from Hugging Face:
-    python tinystories.py download --dataset_name="roneneldan/TinyStories" --text_field="text"
-    
-    To tokenize data with the Llama 2 tokenizer:
-    python tinystories.py pretokenize --dataset_name="TinyStories"
-
-    To tokenize data with a custom tokenizer we train ourselves with sentencepiece, e.g.:
-    python tinystories.py train_vocab --vocab_size=2048 --dataset_name="TinyStories"
-    python tinystories.py pretokenize --vocab_size=2048 --dataset_name="TinyStories"
-    
-    To tokenize with custom special tokens (e.g., for instruction tuning):
-    python tinystories.py train_vocab --vocab_size=2048 --special_tokens="[INST],[/INST]"
-    
-    To clean all downloaded data and output files:
-    python tinystories.py fullclean
-    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "stage",

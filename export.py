@@ -39,7 +39,15 @@ except ImportError:
     LlamaConfig = None
     AutoModelForCausalLM = None
 
-from model import ModelArgs, Transformer
+try:
+    from model import ModelArgs, Transformer
+except ImportError:
+    # Define placeholder classes if import fails
+    ModelArgs = None
+    Transformer = None
+    print(
+        "Warning: Unable to import from model module - model export functionality will be limited"
+    )
 
 # -----------------------------------------------------------------------------
 # common utilities
