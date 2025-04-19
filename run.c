@@ -363,16 +363,18 @@ float *forward(Transformer *transformer, int token, int pos) {
     // ffn rmsnorm
     rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
 
-    // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-    // first calculate self.w1(x) and self.w3(x)
+    // Now for FFN in PyTorch we have: self.w2((ReLU(self.w1(x)))^2 *
+    // self.w3(x)) first calculate self.w1(x) and self.w3(x)
     matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
     matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
-    // SwiGLU non-linearity
+    // ReLU^2 non-linearity: (max(0,x))^2
     for (int i = 0; i < hidden_dim; i++) {
       float val = s->hb[i];
-      // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
-      val *= (1.0f / (1.0f + expf(-val)));
+      // Apply ReLU: max(0,x)
+      val = val > 0 ? val : 0;
+      // Square the result: (max(0,x))^2
+      val = val * val;
       // elementwise multiply with w3(x)
       val *= s->hb2[i];
       s->hb[i] = val;
