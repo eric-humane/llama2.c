@@ -71,7 +71,7 @@ warmup_iters = 1000
 # System parameters
 device = "cuda"  # use 'cuda' for GPU training
 dtype = "bfloat16"  # choose from "float32", "bfloat16", "float16"
-use_compile = True  # use torch.compile if desired
+use_compile = False  # use torch.compile if desired
 
 # -----------------------------------------------------------------------------
 config_keys = [
