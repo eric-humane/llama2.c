@@ -8,26 +8,20 @@ Usage examples:
 
 - DDP on 4 GPUs on 1 node:
   $ torchrun --standalone --nproc_per_node=4 train.py
-
-- DDP on 4 GPUs across 2 nodes:
-  Master node (e.g., IP 123.456.123.456):
-  $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py
-  Worker node:
-  $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
-  (If your cluster does not have Infiniband interconnect, prepend NCCL_IB_DISABLE=1)
 """
 
 import math
 import os
 import time
+import importlib.util
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 
 import torch
-from model import Transformer, ModelArgs
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
+from model import Transformer, ModelArgs
 
 from tinystories import Task
 from export import model_export
@@ -48,10 +42,12 @@ wandb_project = "llamac"
 wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
 # Data parameters
-batch_size = 128        # micro-batch size (effective batch size depends on gradient accumulation)
+batch_size = (
+    128  # micro-batch size (effective batch size depends on gradient accumulation)
+)
 max_seq_len = 256
-vocab_source = "custom" # either "llama2" or "custom"
-vocab_size = 2048       # e.g., custom tokenizer's vocab size
+vocab_source = "custom"  # either "llama2" or "custom"
+vocab_size = 2048  # e.g., custom tokenizer's vocab size
 
 # Model parameters
 dim = 192
@@ -68,25 +64,37 @@ max_iters = 100000
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.99
-grad_clip = 1.0      # set to 0.0 to disable clipping
-decay_lr = True      # Turn decay_lr back on, but with a safer learning rate
+grad_clip = 1.0  # set to 0.0 to disable clipping
+decay_lr = True  # Turn decay_lr back on, but with a safer learning rate
 warmup_iters = 1000
 
 # System parameters
-device = "cuda"      # use 'cuda' for GPU training
-dtype = "bfloat16"   # choose from "float32", "bfloat16", "float16"
-compile = True       # use torch.compile if desired
+device = "cuda"  # use 'cuda' for GPU training
+dtype = "bfloat16"  # choose from "float32", "bfloat16", "float16"
+use_compile = True  # use torch.compile if desired
 
 # -----------------------------------------------------------------------------
-config_keys = [k for k, v in globals().items() if not k.startswith("_") and isinstance(v, (int, float, bool, str))]
-exec(open("configurator.py").read())  # Overrides from command-line or config file
+config_keys = [
+    k
+    for k, v in globals().items()
+    if not k.startswith("_") and isinstance(v, (int, float, bool, str))
+]
+# Import config values from configurator.py instead of using exec
+spec = importlib.util.spec_from_file_location("configurator", "configurator.py")
+configurator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(configurator)
+if hasattr(configurator, "get_config_overrides"):
+    overrides = configurator.get_config_overrides(config_keys)
+    globals().update(overrides)
 config = {k: globals()[k] for k in config_keys}
 
 lr_decay_iters = max_iters
 min_lr = 0.0
 
 assert vocab_source in ["llama2", "custom"]
-assert vocab_source == "custom" or vocab_size == 32000, "The vocab from Meta has 32K tokens"
+assert vocab_source == "custom" or vocab_size == 32000, (
+    "The vocab from Meta has 32K tokens"
+)
 
 # -----------------------------------------------------------------------------
 # DDP and Device Setup
@@ -102,7 +110,9 @@ if ddp:
     master_process = ddp_rank == 0
     seed_offset = ddp_rank
     if gradient_accumulation_steps < ddp_world_size:
-        print(f"WARNING: gradient_accumulation_steps ({gradient_accumulation_steps}) is less than ddp_world_size ({ddp_world_size}).")
+        print(
+            f"WARNING: gradient_accumulation_steps ({gradient_accumulation_steps}) is less than ddp_world_size ({ddp_world_size})."
+        )
         gradient_accumulation_steps = ddp_world_size
     assert gradient_accumulation_steps % ddp_world_size == 0
     gradient_accumulation_steps //= ddp_world_size
@@ -110,10 +120,14 @@ else:
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
-tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
+tokens_per_iter = (
+    gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
+)
 if master_process:
     print(f"tokens per iteration: {tokens_per_iter:,}")
-    print(f"({gradient_accumulation_steps} grad accum steps * {ddp_world_size} processes * {batch_size} batch size * {max_seq_len} max seq len)")
+    print(
+        f"({gradient_accumulation_steps} grad accum steps * {ddp_world_size} processes * {batch_size} batch size * {max_seq_len} max seq len)"
+    )
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
@@ -121,8 +135,16 @@ torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 device_type = "cuda" if "cuda" in device else "cpu"
-ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[dtype]
-ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+ptdtype = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}[dtype]
+ctx = (
+    nullcontext()
+    if device_type == "cpu"
+    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+)
 
 # -----------------------------------------------------------------------------
 # Data Loading Setup:
@@ -160,7 +182,15 @@ elif init_from == "resume":
     ckpt_path = os.path.join(out_dir, "ckpt.pt")
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint["model_args"]
-    for k in ["dim", "n_layers", "n_heads", "n_kv_heads", "vocab_size", "multiple_of", "max_seq_len"]:
+    for k in [
+        "dim",
+        "n_layers",
+        "n_heads",
+        "n_kv_heads",
+        "vocab_size",
+        "multiple_of",
+        "max_seq_len",
+    ]:
         model_args[k] = checkpoint_model_args[k]
     gptconf = ModelArgs(**model_args)
     model = Transformer(gptconf)
@@ -168,7 +198,7 @@ elif init_from == "resume":
     unwanted_prefix = "_orig_mod."
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
     iter_num = checkpoint["iter_num"]
     best_val_loss = checkpoint["best_val_loss"]
@@ -183,48 +213,68 @@ loss_fn = torch.nn.CrossEntropyLoss()
 
 # -----------------------------------------------------------------------------
 # Initialize GradScaler (without a device string) and optimizer.
-scaler = torch.amp.GradScaler(enabled=(dtype == "float16"))
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+scaler = torch.amp.GradScaler(enabled=dtype == "float16")
+optimizer = model.configure_optimizers(
+    weight_decay, learning_rate, (beta1, beta2), device_type
+)
 if init_from == "resume" and "optimizer" in checkpoint:
     optimizer.load_state_dict(checkpoint["optimizer"])
 checkpoint = None
 
-if compile:
+if use_compile:
     print("compiling the model... (takes ~1 minute)")
     unoptimized_model = model
     model = torch.compile(model)
-    
+
 if ddp:
-    prefix = "_orig_mod." if compile else ""
+    prefix = "_orig_mod." if use_compile else ""
+    # pylint: disable=protected-access
     model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
     model = DDP(model, device_ids=[ddp_local_rank])
+
 
 # -----------------------------------------------------------------------------
 # Loss Estimation Function: compute loss externally.
 @torch.no_grad()
 def estimate_loss():
+    """Evaluate model on train and validation splits and return average loss.
+
+    Returns:
+        dict: Dictionary containing average loss values for 'train' and 'val' splits
+    """
     out = {}
     model.eval()
     for split in ["train", "val"]:
         batch_iter = iter_batches(split=split)
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = next(batch_iter)
+        split_losses = torch.zeros(eval_iters)
+        for idx in range(eval_iters):
+            x_eval, y_eval = next(batch_iter)
             with ctx:
-                output = model(X, Y)  # output shape: [B, T, vocab_size]
+                eval_logits = model(x_eval, y_eval)  # output shape: [B, T, vocab_size]
                 # Check if output is a tuple and extract the logits
-                if isinstance(output, tuple):
-                    output = output[0]  # Assuming logits are the first element
+                if isinstance(eval_logits, tuple):
+                    eval_logits = eval_logits[
+                        0
+                    ]  # Assuming logits are the first element
                 # Rearrange logits to [B, vocab_size, T] for cross_entropy
-                output = output.transpose(1, 2)
-                # Here, Y is assumed to be of shape [B, T] containing class indices.
-                loss = loss_fn(output, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+                eval_logits = eval_logits.transpose(1, 2)
+                # Here, y_eval is assumed to be of shape [B, T] containing class indices.
+                eval_loss = loss_fn(eval_logits, y_eval)
+            split_losses[idx] = eval_loss.item()
+        out[split] = split_losses.mean()
     model.train()
     return out
 
+
 def get_lr(it):
+    """Calculate learning rate based on iteration number using warmup and cosine decay.
+
+    Args:
+        it: Current iteration number
+
+    Returns:
+        Learning rate value
+    """
     if it < warmup_iters:
         return learning_rate * it / warmup_iters
     if it > lr_decay_iters:
@@ -234,8 +284,10 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (learning_rate - min_lr)
 
+
 if wandb_log and master_process:
     import wandb
+
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 train_batch_iter = iter_batches(split="train")
@@ -243,9 +295,9 @@ X, Y = next(train_batch_iter)  # fetch initial batch
 
 # -----------------------------------------------------------------------------
 # Global iteration variables.
-iter_num = 0           # Global training iteration counter.
-best_val_loss = 1e9    # Best validation loss.
-local_iter_num = 0     # For logging.
+iter_num = 0  # Global training iteration counter.
+best_val_loss = 1e9  # Best validation loss.
+local_iter_num = 0  # For logging.
 t0 = time.time()
 raw_model = model.module if ddp else model  # Unwrap DDP if necessary.
 running_mfu = -1.0
@@ -259,18 +311,23 @@ while True:
 
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(
+            f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+        )
         if wandb_log:
             try:
-                wandb.log({
-                    "iter": iter_num,
-                    "tokens": iter_num * tokens_per_iter,
-                    "loss/train": losses["train"],
-                    "loss/val": losses["val"],
-                    "lr": lr,
-                    "mfu": running_mfu * 100,
-                }, step=iter_num)
-            except Exception as e:
+                wandb.log(
+                    {
+                        "iter": iter_num,
+                        "tokens": iter_num * tokens_per_iter,
+                        "loss/train": losses["train"],
+                        "loss/val": losses["val"],
+                        "lr": lr,
+                        "mfu": running_mfu * 100,
+                    },
+                    step=iter_num,
+                )
+            except (wandb.errors.Error, ConnectionError) as e:
                 print(f"wandb logging failed: {e}")
         if losses["val"] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses["val"]
@@ -326,7 +383,9 @@ while True:
         if local_iter_num >= 5:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms | mfu {running_mfu*100:.2f}%")
+        print(
+            f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {running_mfu * 100:.2f}%"
+        )
     iter_num += 1
     local_iter_num += 1
 
