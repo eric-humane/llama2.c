@@ -14,9 +14,6 @@
 #include <unistd.h>
 #endif
 
-// Disable C-style cast warnings - this is C code where they are appropriate
-#pragma GCC diagnostic ignored "-Wold-style-cast"
-
 // ----------------------------------------------------------------------------
 // Transformer model
 
