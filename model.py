@@ -170,10 +170,14 @@ class FeedForward(nn.Module):
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.dropout(self.w2(F.relu(self.w1(x)) ** 2))
+        w1x = self.w1(x)
+        w3x = self.w3(x)
+        hidden = (F.relu(w1x) ** 2) * w3x
+        return self.dropout(self.w2(hidden))
 
 
 class TransformerBlock(nn.Module):

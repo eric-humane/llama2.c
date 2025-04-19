@@ -134,6 +134,8 @@ def legacy_export(model, filepath):
         serialize_fp32(out_file, layer.feed_forward.w1.weight)
     for layer in model.layers:
         serialize_fp32(out_file, layer.feed_forward.w2.weight)
+    for layer in model.layers:
+        serialize_fp32(out_file, layer.feed_forward.w3.weight)
 
     # final rmsnorm
     serialize_fp32(out_file, model.norm.weight)
@@ -201,6 +203,7 @@ def version1_export(model, filepath):
         *[layer.attention.wo.weight for layer in model.layers],
         *[layer.feed_forward.w1.weight for layer in model.layers],
         *[layer.feed_forward.w2.weight for layer in model.layers],
+        *[layer.feed_forward.w3.weight for layer in model.layers],
     ]
     if not shared_classifier:
         weights.append(model.output.weight)
@@ -234,6 +237,7 @@ def version2_export(model, filepath, group_size=64):
         *[layer.attention.wo.weight for layer in model.layers],
         *[layer.feed_forward.w1.weight for layer in model.layers],
         *[layer.feed_forward.w2.weight for layer in model.layers],
+        *[layer.feed_forward.w3.weight for layer in model.layers],
     ]
     shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
     if not shared_classifier:
@@ -366,6 +370,9 @@ def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
         )
         hf_state_dict[f"model.layers.{i}.mlp.down_proj.weight"] = (
             llama_model.layers[layer_id].feed_forward.w2.weight.clone().to(dtype)
+        )
+        hf_state_dict[f"model.layers.{i}.mlp.gate_proj.weight"] = (
+            llama_model.layers[layer_id].feed_forward.w3.weight.clone().to(dtype)
         )
 
     # llama2.c usually uses tied weights -> reference the embed_tokens.weights instead
@@ -509,6 +516,9 @@ def load_meta_model(model_path):
         layer.feed_forward.w2.weight = nn.Parameter(
             state_dict[f"layers.{i}.feed_forward.w2.weight"]
         )
+        layer.feed_forward.w3.weight = nn.Parameter(
+            state_dict[f"layers.{i}.feed_forward.w3.weight"]
+        )
 
     # final classifier
     model.output.weight = nn.Parameter(state_dict["output.weight"])
@@ -578,6 +588,9 @@ def load_hf_model(model_path):
         )
         layer.feed_forward.w2.weight = nn.Parameter(
             hf_dict[f"model.layers.{i}.mlp.down_proj.weight"]
+        )
+        layer.feed_forward.w3.weight = nn.Parameter(
+            hf_dict[f"model.layers.{i}.mlp.gate_proj.weight"]
         )
 
     # final classifier
@@ -699,6 +712,7 @@ def version3_export(model, filepath):
         *[layer.attention.wo.weight for layer in model.layers],
         *[layer.feed_forward.w1.weight for layer in model.layers],
         *[layer.feed_forward.w2.weight for layer in model.layers],
+        *[layer.feed_forward.w3.weight for layer in model.layers],
     ]
     if not shared_classifier:
         weights.append(model.output.weight)
