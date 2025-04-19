@@ -28,7 +28,8 @@ class Tokenizer:
     def __init__(self, tokenizer_model=None):
         model_path = tokenizer_model if tokenizer_model else TOKENIZER_MODEL
         assert os.path.isfile(model_path), model_path
-        self.sp_model = SentencePieceProcessor.Load(model_path)
+        self.sp_model = SentencePieceProcessor()
+        self.sp_model.Load(model_path)
         self.model_path = model_path
 
         # BOS / EOS token IDs
@@ -37,7 +38,7 @@ class Tokenizer:
         self.eos_id: int = self.sp_model.eos_id()
         self.pad_id: int = self.sp_model.pad_id()
         # print(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
-        assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
+        assert self.sp_model.vocab_size() == self.sp_model.GetPieceSize()
 
     def encode(self, s: str, bos: bool, eos: bool) -> List[int]:
         """
@@ -52,7 +53,7 @@ class Tokenizer:
             List of token IDs
         """
         assert isinstance(s, str)
-        tokens = self.sp_model.encode(s)
+        tokens = self.sp_model.Encode(s, out_type=int)
         if bos:
             tokens = [self.bos_id] + tokens
         if eos:
@@ -69,7 +70,7 @@ class Tokenizer:
         Returns:
             Decoded string
         """
-        return self.sp_model.decode(tokens)
+        return self.sp_model.Decode(tokens)
 
     def export(self):
         """
@@ -80,8 +81,8 @@ class Tokenizer:
         tokens, scores = [], []
         for i in range(self.n_words):
             # decode the token and light postprocessing
-            token = self.sp_model.id_to_piece(i)
-            score = self.sp_model.get_score(i)
+            token = self.sp_model.IdToPiece(i)
+            score = self.sp_model.GetScore(i)
             if i == self.bos_id:
                 token = "\n<s>\n"
             elif i == self.eos_id:
