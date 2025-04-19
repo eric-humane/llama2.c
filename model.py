@@ -9,6 +9,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+# Import FlashAttention
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+    HAS_FLASH_ATTN = True
+    print("FlashAttention2 is available and will be used")
+except ImportError:
+    HAS_FLASH_ATTN = False
+    print("FlashAttention2 is not available, falling back to manual attention")
+
 
 @dataclass
 class ModelArgs:
@@ -166,11 +176,14 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
 
-        # Always create mask for manual attention implementation
-        print("Using manual attention implementation (no flash attention)")
-        mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
-        mask = torch.triu(mask, diagonal=1)
-        self.register_buffer("mask", mask)
+        # Create a mask buffer for manual attention implementation (used as fallback)
+        if not HAS_FLASH_ATTN:
+            print("Using manual attention implementation (no flash attention)")
+            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
+            mask = torch.triu(mask, diagonal=1)
+            self.register_buffer("mask", mask)
+        else:
+            print("Using FlashAttention2 implementation")
 
     def forward(
         self,
@@ -204,23 +217,45 @@ class Attention(nn.Module):
         xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
-        # make heads into a batch dimension
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = xk.transpose(1, 2)
-        xv = xv.transpose(1, 2)
+        if HAS_FLASH_ATTN and xq.device.type == "cuda":
+            # Flash Attention expects shape (batch_size, seq_len, num_heads, head_dim)
+            # No need to transpose here, flash_attn_func works with (B, S, H, D) layout
 
-        # manual implementation
-        scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-        assert hasattr(self, "mask")
-        scores = (
-            scores + self.mask[:, :, :seqlen, :seqlen]
-        )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        scores = self.attn_dropout(scores)
-        output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+            # Apply dropout to attention if needed
+            dropout_p = self.dropout if self.training else 0.0
 
-        # restore time as batch dimension and concat heads
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            # Create causal mask - flash_attn_func automatically applies causal mask
+            # when causal=True
+            output = flash_attn_func(
+                xq,
+                xk,
+                xv,
+                dropout_p=dropout_p,
+                causal=True,
+                softmax_scale=1.0 / math.sqrt(self.head_dim),
+            )
+
+            # Reshape output to (bs, seqlen, n_local_heads * head_dim)
+            output = output.contiguous().view(bsz, seqlen, -1)
+        else:
+            # Fallback to manual implementation
+            # make heads into a batch dimension
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+
+            # manual implementation
+            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+            assert hasattr(self, "mask")
+            scores = (
+                scores + self.mask[:, :, :seqlen, :seqlen]
+            )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
+            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+
+            # restore time as batch dimension and concat heads
+            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
         # final projection into the residual stream
         output = self.wo(output)
