@@ -510,7 +510,7 @@ int str_lookup(const char *str, const TokenIndex *sorted_vocab,
   return res != NULL ? res->id : -1;
 }
 
-void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens,
+void encode(Tokenizer *t, const char *text, int8_t bos, int8_t eos, int *tokens,
             int *n_tokens) {
   // encode the string text (input) into an upper-bound preallocated tokens[]
   // array bos != 0 means prepend the BOS token (=1), eos != 0 means append the
@@ -563,7 +563,7 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens,
   // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
 
   // process the raw (UTF-8) byte sequence of the input string
-  for (char *c = text; *c != '\0'; c++) {
+  for (const char *c = text; *c != '\0'; c++) {
 
     // reset buffer if the current byte is ASCII or a leading byte
     // 0xC0 is 11000000, so (*c & 0xC0) keeps the first 2 bits and zeros the
@@ -809,8 +809,8 @@ long time_in_ms() {
 // generation loop
 
 void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
-              char *prompt, int steps) {
-  char *empty_prompt = "";
+              const char *prompt, int steps) {
+  const char *empty_prompt = "";
   if (prompt == NULL) {
     prompt = empty_prompt;
   }
@@ -1024,10 +1024,10 @@ int main(int argc, char *argv[]) {
   float topp =
       0.9f; // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
   int steps = 256;                 // number of steps to run for
-  char *prompt = NULL;             // prompt string
+  const char *prompt = NULL;       // prompt string
   unsigned long long rng_seed = 0; // seed rng with time by default
   const char *mode = "generate";   // generate|chat
-  char *system_prompt =
+  const char *system_prompt =
       NULL; // the (optional) system prompt to use in chat mode
 
   // poor man's C argparse so we can override the defaults above from the

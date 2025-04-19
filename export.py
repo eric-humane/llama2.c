@@ -28,6 +28,15 @@ import numpy as np
 import torch
 from torch import nn
 
+# Conditional import for transformers
+try:
+    from transformers.models.llama.configuration_llama import LlamaConfig
+
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    LlamaConfig = None
+
 from model import ModelArgs, Transformer
 
 # -----------------------------------------------------------------------------
@@ -298,12 +307,10 @@ def version2_export(model, filepath, group_size=64):
 def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
     """Generate the pytorch_model.bin state_dict and config.json for HuggingFace"""
 
-    try:
-        from transformers.models.llama.configuration_llama import LlamaConfig
-    except ImportError:
+    if not TRANSFORMERS_AVAILABLE:
         print("Error: transformers package is required to load huggingface models")
         print("Please run `pip install transformers` to install it")
-        return None
+        return
 
     # Generate LlamaModel state_dict
     hf_state_dict = {}
@@ -510,14 +517,14 @@ def load_meta_model(model_path):
 
 
 def load_hf_model(model_path):
-    try:
-        from transformers import AutoModelForCausalLM
-    except ImportError:
+    if not TRANSFORMERS_AVAILABLE:
         print("Error: transformers package is required to load huggingface models")
         print("Please run `pip install transformers` to install it")
         return None
 
     # load HF model
+    from transformers import AutoModelForCausalLM
+
     hf_model = AutoModelForCausalLM.from_pretrained(model_path)
     hf_dict = hf_model.state_dict()
 
