@@ -6,4 +6,4 @@ tqdm==4.67.1
 wandb==0.19.9
 datasets==3.5.0
 transformers
-flash-attn==2.5.6
+flash-attn==2.7.4.post1

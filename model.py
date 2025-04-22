@@ -11,7 +11,7 @@ from torch import nn
 
 # Import FlashAttention
 try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn import flash_attn_func
 
     HAS_FLASH_ATTN = True
     print("FlashAttention2 is available and will be used")
