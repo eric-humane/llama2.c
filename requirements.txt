@@ -6,4 +6,5 @@ tqdm==4.67.1
 wandb==0.19.9
 datasets==3.5.0
 transformers
+--extra-index-url https://pypi.jetson-ai-lab.dev/sbsa/cu128
 flash-attn==2.7.4.post1
